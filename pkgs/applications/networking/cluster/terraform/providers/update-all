@@ -10,18 +10,19 @@ set -euo pipefail
 GET() {
   local url=$1
   echo "fetching $url" >&2
-  curl -#fL "$url"
+  curl -#fL -u "$GITHUB_AUTH" "$url"
 }
 
 get_org_repos() {
   local org=$1
-  GET "https://api.github.com/orgs/$org/repos" | jq -r '.[].name'
+  local page=1
+  GET "https://api.github.com/orgs/$org/repos?per_page=100" | jq -r '.[].name'
 }
 
 get_repo_tags() {
   local owner=$1
   local repo=$2
-  GET "https://api.github.com/repos/$owner/$repo/git/refs/tags" | \
+  GET "https://api.github.com/repos/$owner/$repo/git/refs/tags?per_page=100" | \
     jq -r '.[].ref' | \
     cut -d '/' -f 3- | \
     sort --version-sort
@@ -41,42 +42,54 @@ echo_entry() {
   local sha256=$4
   local version=${3:1}
   cat <<EOF
-{
-  pname = "$repo";
-  version = "$version";
-  src = {
+{ buildGoPackage, fetchFromGitHub }:
+buildGoPackage {
+  name = "$repo-$version";
+  goPackagePath = "github.com/$owner/$repo";
+  src = fetchFromGitHub {
     owner  = "$owner";
     repo   = "$repo";
     rev    = "$rev";
     sha256 = "$sha256";
   };
-};
+}
 EOF
 }
 
 indent() { sed 's/^/    /'; }
+
+## Main ##
+
+cd "$(dirname "$0")"
+
+if [[ -z "${GITHUB_AUTH:-}" ]]; then
+  cat <<'HELP'
+Missing the GITHUB_AUTH env. Thi is required to work around the 60 request
+per hour rate-limit.
+
+Go to https://github.com/settings/tokens and create a new token with the
+"public_repo" scope.
+
+Then `export GITHUB_AUTH=<your user>:<your token>` and run this script again.
+HELP
+  exit 1
+fi
 
 org=terraform-providers
 
 repos=$(get_org_repos "$org" | grep terraform-provider- | sort)
 
 
-# Get all the providers with index
+# Get all the providers
 
-echo -n > data.nix
-
-echo "{" >> data.nix
 for repo in $repos; do
   echo "*** $repo ***"
   name=$(echo "$repo" | cut -d - -f 3-)
   last_tag=$(get_repo_tags "$org" "$repo" | tail -1)
   last_tag_sha256=$(prefetch_github "$org" "$repo" "$last_tag")
 
-  {
-    echo "  $name ="
-    echo_entry "$org" "$repo" "$last_tag" "$last_tag_sha256" | indent
-  } >> data.nix
+  mkdir -p "$name"
+  echo_entry "$org" "$repo" "$last_tag" "$last_tag_sha256" > "$name/default.nix"
 done
-echo "}" >> data.nix
 
 echo Done.
